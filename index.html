@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat Task Extractor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f5f6f8; color: #1d2330; }
+  main { max-width: 1000px; margin: 0 auto; padding: 24px 16px; }
+  h1 { margin: 0 0 16px; font-size: 24px; }
+  .box { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card { background: #fff; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .card .n { font-size: 28px; font-weight: 600; }
+  .card .l { color: #667; font-size: 13px; }
+  button { background: #2f6fed; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; cursor: pointer; }
+  button.secondary { background: #635bff; }
+  button:disabled { opacity: .6; cursor: default; }
+  select { padding: 6px; }
+  #msg { font-size: 14px; }
+  .err { color: #c0392b; }
+  .tag { display: inline-block; background: #e8eefc; color: #2f4fa8; border-radius: 12px; padding: 2px 10px; margin: 2px 4px 2px 0; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; vertical-align: top; }
+  tr.done td { color: #999; text-decoration: line-through; }
+  .p-high { color: #c0392b; font-weight: 600; }
+  .quote { color: #667; font-style: italic; font-size: 12px; }
+  .table-wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Chat Task Extractor</h1>
+
+  <div class="box">
+    <div class="row">
+      <input type="file" id="file" accept=".txt">
+      <button id="upload">Upload &amp; extract</button>
+      <span id="msg"></span>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <span><strong id="credits">–</strong> extractions left</span>
+      <button id="buy" class="secondary">Buy 10 more ($5) with Stripe</button>
+    </div>
+  </div>
+
+  <div class="box row">
+    <label for="chatSelect">Chat:</label>
+    <select id="chatSelect"></select>
+  </div>
+
+  <div class="cards">
+    <div class="card"><div class="n" id="cTotal">0</div><div class="l">Total tasks</div></div>
+    <div class="card"><div class="n" id="cOpen">0</div><div class="l">Open</div></div>
+    <div class="card"><div class="n" id="cDone">0</div><div class="l">Done</div></div>
+    <div class="card"><div class="n" id="cHigh">0</div><div class="l">High priority</div></div>
+  </div>
+
+  <div class="box">
+    <h3 style="margin-top:0">Summary</h3>
+    <p id="summary">Upload a chat to get started.</p>
+    <div id="topics"></div>
+  </div>
+
+  <div class="box">
+    <h3 style="margin-top:0">Tasks per owner</h3>
+    <div style="height:260px"><canvas id="chart"></canvas></div>
+  </div>
+
+  <div class="box table-wrap">
+    <h3 style="margin-top:0">Tasks</h3>
+    <table>
+      <thead><tr><th>Done</th><th>Task</th><th>Owner</th><th>Due</th><th>Priority</th></tr></thead>
+      <tbody id="tasks"></tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+let chats = [], tasks = [], chart;
+let clientId;
+try {
+  clientId = localStorage.getItem("clientId");
+  if (!clientId) { clientId = crypto.randomUUID(); localStorage.setItem("clientId", clientId); }
+} catch { clientId = crypto.randomUUID(); }
+const $ = id => document.getElementById(id);
+const esc = s => (s ?? "").toString().replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+async function loadChats(selectId) {
+  chats = await (await fetch("/api/chats")).json();
+  $("chatSelect").innerHTML = chats.map(c =>
+    `<option value="${c.id}">${esc(c.filename)} — ${c.task_count} tasks (${c.created_at.slice(0,16).replace("T"," ")})</option>`
+  ).join("");
+  if (chats.length) {
+    $("chatSelect").value = selectId ?? chats[0].id;
+    await loadTasks();
+  }
+}
+
+async function loadTasks() {
+  const id = Number($("chatSelect").value);
+  const chat = chats.find(c => c.id === id);
+  $("summary").textContent = chat?.summary || "No summary.";
+  $("topics").innerHTML = (chat?.topics || []).map(t => `<span class="tag">${esc(t)}</span>`).join("");
+  tasks = await (await fetch(`/api/chats/${id}/tasks`)).json();
+  render();
+}
+
+function render() {
+  $("cTotal").textContent = tasks.length;
+  $("cOpen").textContent = tasks.filter(t => t.status === "open").length;
+  $("cDone").textContent = tasks.filter(t => t.status === "done").length;
+  $("cHigh").textContent = tasks.filter(t => t.priority === "high").length;
+
+  $("tasks").innerHTML = tasks.map(t => `
+    <tr class="${t.status === "done" ? "done" : ""}">
+      <td><input type="checkbox" data-id="${t.id}" ${t.status === "done" ? "checked" : ""}></td>
+      <td><strong>${esc(t.title)}</strong>${t.description ? `<br>${esc(t.description)}` : ""}
+          ${t.source_quote ? `<div class="quote">“${esc(t.source_quote)}”</div>` : ""}</td>
+      <td>${esc(t.owner) || "—"}</td>
+      <td>${esc(t.due_date) || "—"}</td>
+      <td class="p-${t.priority}">${t.priority}</td>
+    </tr>`).join("") || `<tr><td colspan="5">No tasks found.</td></tr>`;
+
+  const counts = {};
+  tasks.forEach(t => { const o = t.owner || "Unassigned"; counts[o] = (counts[o] || 0) + 1; });
+  chart?.destroy();
+  chart = new Chart($("chart"), {
+    type: "bar",
+    data: { labels: Object.keys(counts), datasets: [{ label: "Tasks", data: Object.values(counts), backgroundColor: "#2f6fed" }] },
+    options: { maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
+  });
+}
+
+$("tasks").addEventListener("change", async e => {
+  if (!e.target.matches("input[type=checkbox]")) return;
+  const id = Number(e.target.dataset.id), status = e.target.checked ? "done" : "open";
+  const res = await fetch(`/api/tasks/${id}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status })
+  });
+  if (!res.ok) { e.target.checked = !e.target.checked; return alert("Could not update task"); }
+  tasks.find(t => t.id === id).status = status;
+  render();
+});
+
+$("chatSelect").addEventListener("change", loadTasks);
+
+$("upload").addEventListener("click", async () => {
+  const f = $("file").files[0];
+  if (!f) return ($("msg").innerHTML = `<span class="err">Choose a .txt file first.</span>`);
+  const fd = new FormData(); fd.append("file", f);
+  $("upload").disabled = true; $("msg").textContent = "Extracting tasks…";
+  try {
+    const res = await fetch("/api/chats", { method: "POST", body: fd, headers: { "X-Client-Id": clientId } });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    $("msg").textContent = `Done: ${data.task_count} tasks extracted.`;
+    $("credits").textContent = data.credits;
+    await loadChats(data.chat_id);
+  } catch (err) {
+    $("msg").innerHTML = `<span class="err">Error: ${esc(err.message)}</span>`;
+  } finally {
+    $("upload").disabled = false;
+  }
+});
+
+async function loadCredits() {
+  const r = await fetch(`/api/billing/balance?client_id=${encodeURIComponent(clientId)}`);
+  if (r.ok) $("credits").textContent = (await r.json()).credits;
+}
+
+$("buy").addEventListener("click", async () => {
+  $("buy").disabled = true;
+  const r = await fetch("/api/billing/checkout", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ client_id: clientId })
+  });
+  const data = await r.json();
+  if (!r.ok) { $("buy").disabled = false; return ($("msg").innerHTML = `<span class="err">${esc(data.detail)}</span>`); }
+  location.href = data.url;
+});
+
+async function handleCheckoutReturn() {
+  const sessionId = new URLSearchParams(location.search).get("session_id");
+  if (!sessionId) return;
+  history.replaceState(null, "", "/");
+  const r = await fetch(`/api/billing/confirm?session_id=${encodeURIComponent(sessionId)}`);
+  const data = await r.json();
+  if (!r.ok) return ($("msg").innerHTML = `<span class="err">${esc(data.detail)}</span>`);
+  if (data.client_id !== clientId) {  // browser storage was reset: adopt the paying id
+    clientId = data.client_id;
+    try { localStorage.setItem("clientId", clientId); } catch {}
+  }
+  $("msg").textContent = "Payment received, credits added. Thanks!";
+}
+
+handleCheckoutReturn().then(loadCredits);
+loadChats();
+</script>
+</body>
+</html>
